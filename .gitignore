@@ -1,0 +1,6 @@
+*.res
+*.vcxproj*
+*.vs*
+/build
+/out
+CMakeSettings.json
