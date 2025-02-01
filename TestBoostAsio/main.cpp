@@ -1,72 +1,94 @@
-﻿#include <functional>
+﻿#include <ctime>
 #include <iostream>
-#include <thread>
+#include <string>
+#include <array>
 #include <boost/asio.hpp>
 
-class Printer
+using boost::asio::ip::tcp;
+
+namespace {
+    std::string make_daytime_string()
+    {
+        using namespace std; // For time_t, time and ctime;
+        time_t now = time(0);
+        return ctime(&now);
+    }
+
+    constexpr auto IP_ADDRESS = "localhost";
+} // namespace
+
+int main(int argc, char* argv[])
 {
-public:
-    Printer(boost::asio::io_context& io)
-        : strand_(boost::asio::make_strand(io)),
-        timer1_(io, boost::asio::chrono::seconds(1)),
-        timer2_(io, boost::asio::chrono::seconds(1)),
-        count_(0)
+    if (argc != 2)
     {
-        timer1_.async_wait(boost::asio::bind_executor(strand_,
-            std::bind(&Printer::print1, this)));
-
-        timer2_.async_wait(boost::asio::bind_executor(strand_,
-            std::bind(&Printer::print2, this)));
+      std::cerr << "Usage: client <host>" << std::endl;
+      return 1;
     }
 
-    ~Printer()
-    {
-        std::cout << "Final count is " << count_ << std::endl;
-    }
+    std::cout << argv[1] << std::endl;
+    const std::string arg1 = argv[1];
 
-    void print1()
+    if (arg1 == "client")
     {
-        if (count_ < 10)
+        try
         {
-            std::cout << "Timer 1: " << count_ << std::endl;
-            ++count_;
+            boost::asio::io_context io_context;
 
-            timer1_.expires_at(timer1_.expiry() + boost::asio::chrono::seconds(1));
+            tcp::resolver resolver(io_context);
+            tcp::resolver::results_type endpoints = resolver.resolve(IP_ADDRESS, "daytime");
 
-            timer1_.async_wait(boost::asio::bind_executor(strand_,
-                    std::bind(&Printer::print1, this)));
+            tcp::socket socket(io_context);
+            boost::asio::connect(socket, endpoints);
+
+            for (;;)
+            {
+                std::array<char, 128> buf;
+                boost::system::error_code error;
+
+                const size_t len = socket.read_some(boost::asio::buffer(buf), error);
+
+                if (error == boost::asio::error::eof)
+                {
+                    std::cerr << "Connection closed cleanly by peer." << std::endl;
+                    break;
+                }
+                else if (error)
+                {
+                    throw boost::system::system_error(error); // Some other error.
+                }
+
+                std::cout.write(buf.data(), len);
+            }
+        }
+        catch (std::exception& e)
+        {
+            std::cerr << e.what() << std::endl;
         }
     }
-
-    void print2()
+    else if (arg1 == "server")
     {
-        if (count_ < 10)
+        try
         {
-            std::cout << "Timer 2: " << count_ << std::endl;
-            ++count_;
+            boost::asio::io_context io_context;
+            tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 13));
 
-            timer2_.expires_at(timer2_.expiry() + boost::asio::chrono::seconds(1));
+            for (;;)
+            {
+                tcp::socket socket(io_context);
+                acceptor.accept(socket);
 
-            timer2_.async_wait(boost::asio::bind_executor(strand_,
-                    std::bind(&Printer::print2, this)));
+                std::string message = make_daytime_string();
+
+                boost::system::error_code ignored_error;
+                std::cout << "will send: " << message << std::endl;
+                boost::asio::write(socket, boost::asio::buffer(message), ignored_error);
+            }
+        }
+        catch (std::exception& e)
+        {
+            std::cerr << e.what() << std::endl;
         }
     }
-
-private:
-    boost::asio::strand<boost::asio::io_context::executor_type> strand_;
-    boost::asio::steady_timer timer1_;
-    boost::asio::steady_timer timer2_;
-    int count_;
-};
-
-int main()
-{
-    boost::asio::io_context io;
-    Printer p(io);
-    std::thread t([&io]{ io.run(); });
-    io.run();
-    t.join();
-
     std::cout << "Bye-bye!" << std::endl;
     return 0;
 }
