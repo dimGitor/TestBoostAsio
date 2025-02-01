@@ -1,56 +1,72 @@
 ﻿#include <functional>
 #include <iostream>
+#include <thread>
 #include <boost/asio.hpp>
 
-namespace
+class Printer
 {
-    class Printer
+public:
+    Printer(boost::asio::io_context& io)
+        : strand_(boost::asio::make_strand(io)),
+        timer1_(io, boost::asio::chrono::seconds(1)),
+        timer2_(io, boost::asio::chrono::seconds(1)),
+        count_(0)
     {
-    public:
-        Printer(boost::asio::io_context& io)
-            : timer_(io, boost::asio::chrono::seconds(1)),
-            count_(0)
+        timer1_.async_wait(boost::asio::bind_executor(strand_,
+            std::bind(&Printer::print1, this)));
+
+        timer2_.async_wait(boost::asio::bind_executor(strand_,
+            std::bind(&Printer::print2, this)));
+    }
+
+    ~Printer()
+    {
+        std::cout << "Final count is " << count_ << std::endl;
+    }
+
+    void print1()
+    {
+        if (count_ < 10)
         {
-            timer_.async_wait(std::bind(&Printer::print, this));
-        }
+            std::cout << "Timer 1: " << count_ << std::endl;
+            ++count_;
 
-        ~Printer()
+            timer1_.expires_at(timer1_.expiry() + boost::asio::chrono::seconds(1));
+
+            timer1_.async_wait(boost::asio::bind_executor(strand_,
+                    std::bind(&Printer::print1, this)));
+        }
+    }
+
+    void print2()
+    {
+        if (count_ < 10)
         {
-            std::cout << "Final count is " << count_ << std::endl;
+            std::cout << "Timer 2: " << count_ << std::endl;
+            ++count_;
+
+            timer2_.expires_at(timer2_.expiry() + boost::asio::chrono::seconds(1));
+
+            timer2_.async_wait(boost::asio::bind_executor(strand_,
+                    std::bind(&Printer::print2, this)));
         }
+    }
 
-        void print()
-        {
-            if (count_ < 5)
-            {
-                std::cout << "Printer: " << count_ << std::endl;
-                ++count_;
+private:
+    boost::asio::strand<boost::asio::io_context::executor_type> strand_;
+    boost::asio::steady_timer timer1_;
+    boost::asio::steady_timer timer2_;
+    int count_;
+};
 
-                timer_.expires_after(boost::asio::chrono::seconds(1));
-                timer_.async_wait(std::bind(&Printer::print, this));
-                std::cout << "Another code..." << std::endl;
-            }
-            else
-            {
-                std::cout << "Canceling timer..." << std::endl;
-                timer_.cancel();
-                static_cast<boost::asio::io_context&>(timer_.get_executor().context()).stop();
-            }
-        }
-
-    private:
-        boost::asio::steady_timer timer_;
-        int count_;
-    };
-}
-
-int main(int argc, char** argv)
+int main()
 {
-	namespace asio = boost::asio;
-
-    asio::io_context io;
+    boost::asio::io_context io;
     Printer p(io);
+    std::thread t([&io]{ io.run(); });
     io.run();
-    std::cout << "Bye" << std::endl;
-	return 0;
+    t.join();
+
+    std::cout << "Bye-bye!" << std::endl;
+    return 0;
 }
