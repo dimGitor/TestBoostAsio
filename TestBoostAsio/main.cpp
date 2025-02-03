@@ -30,7 +30,7 @@ namespace {
         return oss.str();
     }
 
-    bool store_in_redis(const std::string& value)
+    bool store_in_redis_overwrite(const std::string& value)
     {
         std::cout << "Connecting to Redis..." << std::endl;
         redisContext* context = redisConnect(REDIS_HOST, REDIS_PORT);
@@ -44,6 +44,30 @@ namespace {
         bool success = (reply != nullptr);
         if (reply) 
             freeReplyObject(reply);
+        redisFree(context);
+        return success;
+    }
+
+    bool store_in_redis_history(const std::string& value)
+    {
+        std::cout << "Connecting to Redis for history storage..." << std::endl;
+        redisContext* context = redisConnect(REDIS_HOST, REDIS_PORT);
+        if (!context || context->err)
+        {
+            std::cerr << "Redis connection error: " << (context ? context->errstr : "Unknown") << std::endl;
+            return false;
+        }
+
+        std::cout << "Storing value in Redis history: " << value << std::endl;
+
+        redisReply* reply = (redisReply*)redisCommand(context, "LPUSH %s %s", "daytime_history", value.c_str());
+        bool success = (reply != nullptr);
+        if (reply) freeReplyObject(reply);
+
+        // 10 records is maximum count
+        reply = (redisReply*)redisCommand(context, "LTRIM %s 0 9", "daytime_history");
+        if (reply) freeReplyObject(reply);
+
         redisFree(context);
         return success;
     }
@@ -64,6 +88,42 @@ namespace {
         if (reply) 
             freeReplyObject(reply);
         redisFree(context);
+        return value;
+    }
+
+    std::string fetch_from_redis_history()
+    {
+        std::cout << "Fetching history from Redis..." << std::endl;
+        redisContext* context = redisConnect(REDIS_HOST, REDIS_PORT);
+        if (!context || context->err)
+        {
+            std::cerr << "Redis connection error: " << (context ? context->errstr : "Unknown") << std::endl;
+            return "Redis Error";
+        }
+
+        redisReply* reply = (redisReply*)redisCommand(context, "LRANGE %s 0 9", "daytime_history");
+        std::string value;
+
+        if (reply && reply->type == REDIS_REPLY_ARRAY)
+        {
+            for (size_t i = 0; i < reply->elements; ++i)
+            {
+                value += reply->element[i]->str;
+                if (i < reply->elements - 1)
+                    value += ", ";
+            }
+        }
+        else
+        {
+            value = "No Data";
+        }
+
+        std::cout << "Fetched history: " << value << std::endl;
+
+        if (reply)
+            freeReplyObject(reply);
+        redisFree(context);
+
         return value;
     }
 
@@ -93,7 +153,8 @@ namespace {
                         << remote_endpoint_.address().to_string() << ":" 
                         << remote_endpoint_.port() << std::endl;
 
-                std::string redis_value = fetch_from_redis();
+                //const auto redis_value = fetch_from_redis();
+                const auto redis_value = fetch_from_redis_history();
                 std::cout << "[Redis] Retrieved value: " << redis_value << std::endl;
 
                 std::shared_ptr<std::string> message(new std::string(redis_value));
@@ -131,7 +192,7 @@ namespace {
             std::cout << "[Client] Sending request to server..." << std::endl;
             socket.send_to(boost::asio::buffer(send_buf), receiver_endpoint);
             
-            std::array<char, 128> recv_buf;
+            std::array<char, 1000> recv_buf;
             udp::endpoint sender_endpoint;
             size_t len = socket.receive_from(boost::asio::buffer(recv_buf), sender_endpoint);
 
@@ -149,7 +210,8 @@ namespace {
     {
         try
         {
-            if (!store_in_redis(make_daytime_string())) 
+            //if (!store_in_redis_overwrite(make_daytime_string()))
+            if (!store_in_redis_history(make_daytime_string()))
             {
                 std::cerr << "Failed to store data in Redis." << std::endl;
                 return;
