@@ -21,7 +21,7 @@ namespace {
         std::ostringstream oss;
         std::time_t now = std::time(nullptr);
         std::tm localTime;
-#ifdef WIN32
+#ifdef _WIN32
         localtime_s(&localTime, &now);
 #else
         localtime_r(&now, &localTime);
@@ -42,7 +42,8 @@ namespace {
         std::cout << "Connected to Redis, storing value: " << value << std::endl;
         redisReply* reply = (redisReply*)redisCommand(context, "SET %s %s", REDIS_KEY, value.c_str());
         bool success = (reply != nullptr);
-        if (reply) freeReplyObject(reply);
+        if (reply) 
+            freeReplyObject(reply);
         redisFree(context);
         return success;
     }
@@ -60,7 +61,8 @@ namespace {
         redisReply* reply = (redisReply*)redisCommand(context, "GET %s", REDIS_KEY);
         std::string value = (reply && reply->type == REDIS_REPLY_STRING) ? reply->str : "No Data";
         std::cout << "Fetched value: " << value << std::endl;
-        if (reply) freeReplyObject(reply);
+        if (reply) 
+            freeReplyObject(reply);
         redisFree(context);
         return value;
     }
@@ -120,7 +122,7 @@ namespace {
         {
             boost::asio::io_context io_context;
             udp::resolver resolver(io_context);
-            udp::endpoint receiver_endpoint = *resolver.resolve(udp::v4(), "127.0.0.1", std::to_string(SERVER_PORT)).begin(); // REDIS_HOST
+            udp::endpoint receiver_endpoint = *resolver.resolve(udp::v4(), "127.0.0.1", std::to_string(SERVER_PORT)).begin();
 
             udp::socket socket(io_context);
             socket.open(udp::v4());
@@ -147,7 +149,8 @@ namespace {
     {
         try
         {
-            if (!store_in_redis(make_daytime_string())) {
+            if (!store_in_redis(make_daytime_string())) 
+            {
                 std::cerr << "Failed to store data in Redis." << std::endl;
                 return;
             }
