@@ -5,106 +5,73 @@
 #include <memory>
 #include <string>
 #include <boost/asio.hpp>
+#include <hiredis/hiredis.h>
 
 using boost::asio::ip::tcp;
 using boost::asio::ip::udp;
 
 namespace {
+    constexpr auto REDIS_HOST = "172.24.206.9";
+    constexpr auto REDIS_PORT = 6379;
+    constexpr auto REDIS_KEY  = "daytime";
+    constexpr auto SERVER_PORT = 5000;
+
     std::string make_daytime_string()
     {
         std::ostringstream oss;
         std::time_t now = std::time(nullptr);
         std::tm localTime;
-#ifdef _WIN32
+#ifdef WIN32
         localtime_s(&localTime, &now);
 #else
         localtime_r(&now, &localTime);
 #endif
-        // Format: YYYY-MM-DD HH:MM:SS
         oss << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S");
         return oss.str();
     }
 
-    constexpr auto IP_ADDRESS = "localhost";
-
-    class tcp_connection: public std::enable_shared_from_this<tcp_connection>
+    bool store_in_redis(const std::string& value)
     {
-    public:
-        typedef std::shared_ptr<tcp_connection> pointer;
-
-        static pointer create(boost::asio::io_context& io_context)
+        std::cout << "Connecting to Redis..." << std::endl;
+        redisContext* context = redisConnect(REDIS_HOST, REDIS_PORT);
+        if (!context || context->err)
         {
-            return pointer(new tcp_connection(io_context));
+            std::cerr << "Redis connection error: " << (context ? context->errstr : "Unknown") << std::endl;
+            return false;
         }
-
-        tcp::socket& socket()
-        {
-            return socket_;
-        }
-
-    void start()
-    {
-        message_ = make_daytime_string();
-
-        boost::asio::async_write(socket_, boost::asio::buffer(message_),
-            std::bind(&tcp_connection::handle_write, shared_from_this()));
+        std::cout << "Connected to Redis, storing value: " << value << std::endl;
+        redisReply* reply = (redisReply*)redisCommand(context, "SET %s %s", REDIS_KEY, value.c_str());
+        bool success = (reply != nullptr);
+        if (reply) freeReplyObject(reply);
+        redisFree(context);
+        return success;
     }
 
-    private:
-        tcp_connection(boost::asio::io_context& io_context): socket_(io_context)
-        {
-        }
-
-        void handle_write()
-        {
-        }
-
-        tcp::socket socket_;
-        std::string message_;
-    };
-
-    class tcp_server
+    std::string fetch_from_redis()
     {
-    public:
-        tcp_server(boost::asio::io_context& io_context)
-            : io_context_(io_context),
-            acceptor_(io_context, tcp::endpoint(tcp::v4(), 13))
+        std::cout << "Fetching from Redis..." << std::endl;
+        redisContext* context = redisConnect(REDIS_HOST, REDIS_PORT);
+        if (!context || context->err)
         {
-            start_accept();
+            std::cerr << "Redis connection error: " << (context ? context->errstr : "Unknown") << std::endl;
+            return "Redis Error";
         }
 
-    private:
-        void start_accept()
-        {
-            tcp_connection::pointer new_connection = tcp_connection::create(io_context_);
-
-            acceptor_.async_accept(new_connection->socket(),
-                std::bind(&tcp_server::handle_accept, this, new_connection,
-                boost::asio::placeholders::error));
-        }
-
-        void handle_accept(tcp_connection::pointer new_connection, const boost::system::error_code& error)
-        {
-            if (!error)
-            {
-                std::cout << "tcp_server::handle_accept" << std::endl;
-                new_connection->start();
-            }
-
-            start_accept();
-        }
-
-    private:
-        boost::asio::io_context& io_context_;
-        tcp::acceptor acceptor_;
-    };
+        redisReply* reply = (redisReply*)redisCommand(context, "GET %s", REDIS_KEY);
+        std::string value = (reply && reply->type == REDIS_REPLY_STRING) ? reply->str : "No Data";
+        std::cout << "Fetched value: " << value << std::endl;
+        if (reply) freeReplyObject(reply);
+        redisFree(context);
+        return value;
+    }
 
     class udp_server
     {
     public:
         udp_server(boost::asio::io_context& io_context)
-            : socket_(io_context, udp::endpoint(udp::v4(), 13))
+            : socket_(io_context, udp::endpoint(boost::asio::ip::address_v4::any(), SERVER_PORT))
         {
+            std::cout << "UDP Server listening on port " << SERVER_PORT << " on all interfaces" << std::endl;
             start_receive();
         }
 
@@ -113,30 +80,35 @@ namespace {
         {
             socket_.async_receive_from(
                 boost::asio::buffer(recv_buffer_), remote_endpoint_,
-                std::bind(&udp_server::handle_receive, this,
-                boost::asio::placeholders::error));
+                std::bind(&udp_server::handle_receive, this, std::placeholders::_1));
         }
 
         void handle_receive(const boost::system::error_code& error)
         {
             if (!error)
             {
-                std::cout << "udp_server::handle_receive" << std::endl;
-                std::shared_ptr<std::string> message(
-                    new std::string(make_daytime_string()));
+                std::cout << "[UDP Server] Received request from: " 
+                        << remote_endpoint_.address().to_string() << ":" 
+                        << remote_endpoint_.port() << std::endl;
 
+                std::string redis_value = fetch_from_redis();
+                std::cout << "[Redis] Retrieved value: " << redis_value << std::endl;
+
+                std::shared_ptr<std::string> message(new std::string(redis_value));
                 socket_.async_send_to(boost::asio::buffer(*message), remote_endpoint_,
                     std::bind(&udp_server::handle_send, this, message));
+                std::cout << "[UDP Server] Sent response to client." << std::endl;
 
                 start_receive();
             }
+            else
+            {
+                std::cerr << "[UDP Server] Receive error: " << error.message() << std::endl;
+            }
         }
 
-        void handle_send(std::shared_ptr<std::string> /*message*/)
-        {
-        }
+        void handle_send(std::shared_ptr<std::string>) {}
 
-    private:
         udp::socket socket_;
         udp::endpoint remote_endpoint_;
         std::array<char, 1> recv_buffer_;
@@ -147,26 +119,27 @@ namespace {
         try
         {
             boost::asio::io_context io_context;
-
             udp::resolver resolver(io_context);
-            udp::endpoint receiver_endpoint =
-            *resolver.resolve(udp::v4(), IP_ADDRESS, "daytime").begin();
+            udp::endpoint receiver_endpoint = *resolver.resolve(udp::v4(), "127.0.0.1", std::to_string(SERVER_PORT)).begin(); // REDIS_HOST
 
             udp::socket socket(io_context);
             socket.open(udp::v4());
 
-            std::array<char, 1> send_buf  = {{ 0 }};
+            std::array<char, 1> send_buf = {{ 0 }};
+            std::cout << "[Client] Sending request to server..." << std::endl;
             socket.send_to(boost::asio::buffer(send_buf), receiver_endpoint);
-
+            
             std::array<char, 128> recv_buf;
             udp::endpoint sender_endpoint;
             size_t len = socket.receive_from(boost::asio::buffer(recv_buf), sender_endpoint);
 
+            std::cout << "[Client] Received response from server: ";
             std::cout.write(recv_buf.data(), len);
+            std::cout << std::endl;
         }
         catch (std::exception& e)
         {
-            std::cerr << e.what() << std::endl;
+            std::cerr << "[Client] Error: " << e.what() << std::endl;
         }
     }
 
@@ -174,14 +147,19 @@ namespace {
     {
         try
         {
+            if (!store_in_redis(make_daytime_string())) {
+                std::cerr << "Failed to store data in Redis." << std::endl;
+                return;
+            }
+
             boost::asio::io_context io_context;
-            tcp_server server1(io_context);
-            udp_server server2(io_context);
+            udp_server server(io_context);
+            std::cout << "Server is running, waiting for connections..." << std::endl;
             io_context.run();
         }
         catch (std::exception& e)
         {
-            std::cerr << e.what() << std::endl;
+            std::cerr << "Server error: " << e.what() << std::endl;
         }
     }
 } // namespace
@@ -190,24 +168,23 @@ int main(int argc, char* argv[])
 {
     if (argc != 2)
     {
-        std::cerr << "Usage: client <host>" << std::endl;
+        std::cerr << "Usage: program <client|server>" << std::endl;
         return 1;
     }
 
-    const std::string arg1 = argv[1];
-    std::cout << "Argument: " << arg1 << std::endl;
+    const std::string mode = argv[1];
 
-    if (arg1 == "client")
-    {
-        clientWorker();
-    }
-    else if (arg1 == "server")
+    if (mode == "server")
     {
         serverWorker();
     }
+    else if (mode == "client")
+    {
+        clientWorker();
+    }
     else
     {
-        std::cerr << "Unknown mode selected" << std::endl;
+        std::cerr << "Unknown mode!" << std::endl;
         return 1;
     }
 
